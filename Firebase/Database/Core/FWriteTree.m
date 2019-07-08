@@ -42,7 +42,6 @@
 */
 @property (nonatomic, strong) NSMutableArray *allWrites;
 @property (nonatomic) NSInteger lastWriteId;
-@property (nonatomic) NSMutableDictionary *visibleWritePathIndex;
 @end
 
 /**
@@ -60,7 +59,6 @@
     if (self) {
         self.visibleWrites = [FCompoundWrite emptyWrite];
         self.allWrites = [[NSMutableArray alloc] init];
-        self.visibleWritePathIndex = [NSMutableDictionary dictionary];
         self.lastWriteId = -1;
     }
     return self;
@@ -84,7 +82,6 @@
 
     if (visible) {
         self.visibleWrites = [self.visibleWrites addWrite:newData atPath:path];
-        self.visibleWritePathIndex[path] = @([self.visibleWritePathIndex[path] integerValue] + 1);
     }
 
     self.lastWriteId = writeId;
@@ -100,10 +97,6 @@
     [self.allWrites addObject:record];
 
     self.visibleWrites = [self.visibleWrites addCompoundWrite:changedChildren atPath:path];
-    [changedChildren enumerateWrites:^(FPath *childPath, id<FNode> node, BOOL *stop) {
-        FPath *fullPath = [path child:childPath];
-        self.visibleWritePathIndex[fullPath] = @([self.visibleWritePathIndex[fullPath] integerValue] + 1);
-    }];
     self.lastWriteId = writeId;
 }
 
@@ -133,22 +126,17 @@
     FWriteRecord *writeToRemove = self.allWrites[index];
     [self.allWrites removeObjectAtIndex:index];
 
-    __block BOOL removedWriteWasVisible = writeToRemove.visible;
-    if (writeToRemove.isOverwrite) {
-        removedWriteWasVisible = [self removeWriteFromIndexAtPath:writeToRemove.path];
-    } else {
-        [writeToRemove.merge enumerateWrites:^(FPath *path, id<FNode> node, BOOL *stop) {
-            removedWriteWasVisible = [self removeWriteFromIndexAtPath:[writeToRemove.path child:path]] && removedWriteWasVisible;
-        }];
-    }
-    
+    BOOL removedWriteWasVisible = writeToRemove.visible;
     BOOL removedWriteOverlapsWithOtherWrites = NO;
     NSInteger i = [self.allWrites count] - 1;
 
     while (removedWriteWasVisible && i >= 0) {
         FWriteRecord *currentWrite = [self.allWrites objectAtIndex:i];
         if (currentWrite.visible) {
-            if ([writeToRemove.path contains:currentWrite.path]) {
+            if (i >= index && [self record:currentWrite containsPath:writeToRemove.path]) {
+                // The removed write was completely shadowed by a subsequent write.
+                removedWriteWasVisible = NO;
+            } else if ([writeToRemove.path contains:currentWrite.path]) {
                 // Either we're covering some writes or they're covering part of us (depending on which came first).
                 removedWriteOverlapsWithOtherWrites = YES;
             }
@@ -174,22 +162,6 @@
         }
         return YES;
     }
-}
-
-- (BOOL)removeWriteFromIndexAtPath:(FPath *)path {
-    if ([self.visibleWritePathIndex[path] isEqual:@1]) {
-        [self.visibleWritePathIndex removeObjectForKey:path];
-    } else {
-        self.visibleWritePathIndex[path] = @([self.visibleWritePathIndex[path] integerValue] - 1);
-    }
-    FPath *parent = path;
-    while (parent) {
-        if ([self.visibleWritePathIndex[parent] integerValue] > 0) {
-            return NO;
-        }
-        parent = [parent parent];
-    }
-    return YES;
 }
 
 - (NSArray *) removeAllWrites {
